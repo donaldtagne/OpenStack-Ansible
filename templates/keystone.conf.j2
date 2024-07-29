@@ -1,0 +1,16 @@
+[DEFAULT]
+admin_token = {{ admin_password }}
+
+[database]
+connection = mysql+pymysql://keystone:{{ keystone_db_password }}@localhost/keystone
+
+[token]
+provider = fernet
+
+[revoke]
+driver = sql
+
+[cache]
+backend = dogpile.cache.memcached
+enabled = true
+memcache_servers = localhost:11211

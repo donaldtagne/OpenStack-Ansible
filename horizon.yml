@@ -1,0 +1,148 @@
+---
+- name: Install and configure Horizon
+  hosts: controller
+  become: true
+
+  vars_prompt:
+    - name: "controller_ip"
+      prompt: "Enter the Controller IP address"
+    - name: "timezone"
+      prompt: "Enter the timezone"
+
+  pre_tasks:
+    - name: show entered variables
+      debug:
+        msg: "{{ controller_ip }}, {{ timezone }}"
+  tasks:
+    - name: Install Horizon packages
+      apt:
+        name: 
+          - openstack-dashboard
+        state: present
+        update_cache: yes
+
+    - name: Configure OPENSTACK_HOST in local_settings.py
+      lineinfile:
+        path: /etc/openstack-dashboard/local_settings.py
+        regexp: '^OPENSTACK_HOST ='
+        line: 'OPENSTACK_HOST = "{{ controller_ip }}"'
+        state: present
+
+    - name: Allow all hosts to access Dashboard (for development)
+      lineinfile:
+        path: /etc/openstack-dashboard/local_settings.py
+        regexp: '^ALLOWED_HOSTS ='
+        line: 'ALLOWED_HOSTS = ["*"]'
+        state: present
+
+    - name: Configure memcached session storage service in local_settings.py
+      blockinfile:
+        path: /etc/openstack-dashboard/local_settings.py
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - SESSION ENGINE"
+        block: |
+          SESSION_ENGINE = 'django.contrib.sessions.backends.cache'
+          CACHES = {
+              'default': {
+                  'BACKEND': 'django.core.cache.backends.memcached.MemcachedCache',
+                  'LOCATION': '{{ controller_ip }}:11211',
+              }
+          }
+
+    - name: Enable the Identity API version 3 in local_settings.py
+      lineinfile:
+        path: /etc/openstack-dashboard/local_settings.py
+        regexp: '^OPENSTACK_KEYSTONE_URL ='
+        line: 'OPENSTACK_KEYSTONE_URL = "http://%s:5000/v3" % OPENSTACK_HOST'
+        state: present
+
+    - name: Enable support for domains in local_settings.py
+      lineinfile:
+        path: /etc/openstack-dashboard/local_settings.py
+        regexp: '^#OPENSTACK_KEYSTONE_MULTIDOMAIN_SUPPORT ='
+        line: 'OPENSTACK_KEYSTONE_MULTIDOMAIN_SUPPORT = True'
+        state: present
+
+    - name: Configure API versions in local_settings.py
+      blockinfile:
+        path: /etc/openstack-dashboard/local_settings.py
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - API VERSIONS"
+        block: |
+          OPENSTACK_API_VERSIONS = {
+              "identity": 3,
+              "image": 2,
+              "volume": 3,
+          }
+
+    - name: Configure Default domain in local_settings.py
+      lineinfile:
+        path: /etc/openstack-dashboard/local_settings.py
+        regexp: '^#OPENSTACK_KEYSTONE_DEFAULT_DOMAIN ='
+        line: 'OPENSTACK_KEYSTONE_DEFAULT_DOMAIN = "Default"'
+        state: present
+
+    - name: Configure user as default role in local_settings.py
+      lineinfile:
+        path: /etc/openstack-dashboard/local_settings.py
+        regexp: '^#OPENSTACK_KEYSTONE_DEFAULT_ROLE ='
+        line: 'OPENSTACK_KEYSTONE_DEFAULT_ROLE = "user"'
+        state: present
+
+    - name: Disable support for layer-3 networking services (if needed)
+      blockinfile:
+        path: /etc/openstack-dashboard/local_settings.py
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - NEUTRON NETWORK"
+        block: |
+          OPENSTACK_NEUTRON_NETWORK = {
+              'enable_router': False,
+              'enable_quotas': False,
+              'enable_ipv6': False,
+              'enable_distributed_router': False,
+              'enable_ha_router': False,
+              'enable_fip_topology_check': False,
+          }
+
+    - name: Configure time zone in local_settings.py
+      lineinfile:
+        path: /etc/openstack-dashboard/local_settings.py
+        regexp: '^#TIME_ZONE ='
+        line: 'TIME_ZONE = "{{ timezone }}"'
+        state: present
+
+    - name: Deploy openstack-dashboard Apache configuration
+      template:
+        src: templates/openstack.conf.j2
+        dest: /etc/apache2/sites-available/openstack-dashboard.conf
+        mode: '0644'
+
+    - name: Ensure log directory exists
+      file:
+        path: /var/log/openstack-dashboard
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Test Apache configuration
+      command: apachectl configtest
+      register: apache_configtest
+      ignore_errors: yes
+
+    - name: Fail if Apache configuration is invalid
+      fail:
+        msg: "Apache configuration is invalid. Check the configuration."
+      when: apache_configtest.rc != 0
+
+    - name: Enable openstack-dashboard site
+      command: /usr/sbin/a2ensite openstack-dashboard.conf
+
+    - name: Disable default site
+      command: /usr/sbin/a2dissite 000-default.conf
+
+    - name: Restart Apache2 to apply changes
+      systemd:
+        name: apache2
+        state: restarted
+
+    - name: Check Apache2 status
+      command: systemctl status apache2
+      register: apache_status

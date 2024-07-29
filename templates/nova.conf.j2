@@ -1,0 +1,40 @@
+[api_database]
+connection = mysql+pymysql://nova:{{ db_password }}@localhost/nova_api
+
+[database]
+connection = mysql+pymysql://nova:{{ db_password }}@localhost/nova
+
+[DEFAULT]
+transport_url = rabbit://openstack:{{ rabbitmq_password }}@controller
+auth_strategy = keystone
+my_ip = {{ my_ip }}
+use_neutron = True
+firewall_driver = nova.virt.firewall.NoopFirewallDriver
+
+[oslo_messaging_rabbit]
+rabbit_host = controller
+rabbit_userid = openstack
+rabbit_password = {{ rabbitmq_password }}
+
+[keystone_authtoken]
+auth_uri = http://controller:5000
+auth_url = http://controller:35357
+memcached_servers = controller:11211
+auth_type = password
+project_domain_name = default
+user_domain_name = default
+project_name = service
+username = nova
+password = {{ keystone_password }}
+
+[vnc]
+enabled = True
+vncserver_listen = 0.0.0.0
+vncserver_proxyclient_address = $my_ip
+novncproxy_base_url = http://controller:6080/vnc_auto.html
+
+[glance]
+api_servers = http://controller:9292
+
+[oslo_concurrency]
+lock_path = /var/lib/nova/tmp

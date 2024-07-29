@@ -1,0 +1,236 @@
+---
+- name: Install and configure MariaDB and Keystone
+  hosts: controller
+  become: true
+  vars_prompt:
+    - name: "mysql_root_password"
+      prompt: "Enter the MySQL root password"
+      private: yes
+    - name: "keystone_db_password"
+      prompt: "Enter the Keystone database password"
+      private: yes
+    - name: "admin_password"
+      prompt: "Enter the Keystone admin password"
+      private: yes
+    - name: "controller_ip"
+      prompt: "Enter the Controller IP address"
+
+  pre_tasks:
+    - name: show entered variables
+      debug:
+        msg: "{{ mysql_root_password }}, {{ keystone_db_password }}, {{ admin_password }}, {{ controller_ip }}"
+    - name: Install Python3 and pip
+      apt:
+        name:
+          - python3
+          - python3-pip
+        state: present
+        update_cache: yes
+
+    - name: Install MySQL libraries for Python3
+      apt:
+        name:
+          - python3-pymysql
+          - python3-mysqldb
+        state: present
+
+    - name: Set MariaDB root password before installation
+      debconf:
+        name: "mariadb-server"
+        question: "mysql-server/root_password"
+        value: "{{ mysql_root_password }}"
+        vtype: "password"
+
+    - name: Confirm MariaDB root password
+      debconf:
+        name: "mariadb-server"
+        question: "mysql-server/root_password_again"
+        value: "{{ mysql_root_password }}"
+        vtype: "password"
+
+  tasks:
+    - name: Install MariaDB server
+      apt:
+        name: mariadb-server
+        state: present
+        update_cache: yes
+
+    - name: Ensure MariaDB service is running and enabled
+      systemd:
+        name: mariadb
+        state: started
+        enabled: yes
+
+    - name: Update MariaDB root user authentication method
+      mysql_user:
+        name: root
+        host: localhost
+        password: "{{ mysql_root_password }}"
+        priv: "*.*:ALL,GRANT"
+        state: present
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: Create Keystone database
+      mysql_db:
+        name: keystone
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Create Keystone database user
+      mysql_user:
+        name: keystone
+        password: "{{ keystone_db_password }}"
+        priv: "keystone.*:ALL"
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Install Keystone packages
+      apt:
+        name: keystone
+        state: present
+        update_cache: yes
+
+    - name: Create fernet key repositories
+      command: keystone-manage fernet_setup --keystone-user keystone --keystone-group keystone
+
+    - name: Create credential key repositories
+      command: keystone-manage credential_setup --keystone-user keystone --keystone-group keystone
+
+    - name: Configure Keystone
+      template:
+        src: templates/keystone.conf.j2
+        dest: /etc/keystone/keystone.conf
+        mode: '0644'
+
+    - name: Initialize Keystone database
+      command: /usr/bin/keystone-manage db_sync
+
+    - name: Bootstrap Keystone
+      command: >
+        /usr/bin/keystone-manage bootstrap
+        --bootstrap-password "{{ admin_password }}"
+        --bootstrap-admin-url http://{{ controller_ip }}:5000/v3/
+        --bootstrap-internal-url http://{{ controller_ip }}:5000/v3/
+        --bootstrap-public-url http://{{ controller_ip }}:5000/v3/
+        --bootstrap-region-id RegionOne
+
+    - name: Install Apache HTTP Server
+      apt:
+        name: apache2
+        state: present
+        update_cache: yes
+
+    - name: Install mod_wsgi for Apache
+      apt:
+        name: libapache2-mod-wsgi-py3
+        state: present
+
+    - name: Configure Apache HTTP Server
+      copy:
+        content: |
+          ServerName {{ controller_ip }}
+        dest: /etc/apache2/conf-available/servername.conf
+
+    - name: Enable servername.conf
+      command: a2enconf servername
+
+    - name: Enable mod_wsgi
+      command: a2enmod wsgi
+
+    - name: Restart Apache service
+      systemd:
+        name: apache2
+        state: restarted
+        enabled: yes
+
+    - name: Uncomment http-socket in keystone-uwsgi.ini
+      replace:
+        path: /etc/keystone/keystone-uwsgi.ini
+        regexp: '^#http-socket = :5000'
+        replace: 'http-socket = :5000'
+      notify: Restart keystone
+
+    - name: Create admin-openrc.sh file
+      copy:
+        content: |
+          export OS_PROJECT_DOMAIN_NAME=Default
+          export OS_USER_DOMAIN_NAME=Default
+          export OS_PROJECT_NAME=admin
+          export OS_TENANT_NAME=admin
+          export OS_USERNAME=admin
+          export OS_PASSWORD={{ admin_password }}
+          export OS_AUTH_URL=http://{{ controller_ip }}:5000/v3
+          export OS_IDENTITY_API_VERSION=3
+          export OS_IMAGE_API_VERSION=2
+        dest: /root/admin-openrc.sh
+        mode: '0644'
+
+    - name: Load admin credentials
+      shell: source /root/admin-openrc.sh
+      args:
+        executable: /bin/bash
+
+    - name: Check if admin user exists
+      command: openstack user show admin
+      register: admin_user_check
+      failed_when: false
+      changed_when: false
+      environment:
+        OS_PROJECT_DOMAIN_NAME: Default
+        OS_USER_DOMAIN_NAME: Default
+        OS_PROJECT_NAME: admin
+        OS_TENANT_NAME: admin
+        OS_USERNAME: admin
+        OS_PASSWORD: "{{ admin_password }}"
+        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
+        OS_IDENTITY_API_VERSION: 3
+        OS_IMAGE_API_VERSION: 2
+
+    - name: Create admin user if not exists
+      command: openstack user create --domain default --password "{{ admin_password }}" admin
+      when: admin_user_check.rc != 0
+      environment:
+        OS_PROJECT_DOMAIN_NAME: Default
+        OS_USER_DOMAIN_NAME: Default
+        OS_PROJECT_NAME: admin
+        OS_TENANT_NAME: admin
+        OS_USERNAME: admin
+        OS_PASSWORD: "{{ admin_password }}"
+        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
+        OS_IDENTITY_API_VERSION: 3
+        OS_IMAGE_API_VERSION: 2
+
+    - name: Add admin role to admin user
+      command: openstack role add --project admin --user admin admin
+      environment:
+        OS_PROJECT_DOMAIN_NAME: Default
+        OS_USER_DOMAIN_NAME: Default
+        OS_PROJECT_NAME: admin
+        OS_TENANT_NAME: admin
+        OS_USERNAME: admin
+        OS_PASSWORD: "{{ admin_password }}"
+        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
+        OS_IDENTITY_API_VERSION: 3
+        OS_IMAGE_API_VERSION: 2
+
+    - name: Create admin role
+      command: openstack role create admin
+      environment:
+        OS_PROJECT_DOMAIN_NAME: Default
+        OS_USER_DOMAIN_NAME: Default
+        OS_PROJECT_NAME: admin
+        OS_TENANT_NAME: admin
+        OS_USERNAME: admin
+        OS_PASSWORD: "{{ admin_password }}"
+        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
+        OS_IDENTITY_API_VERSION: 3
+        OS_IMAGE_API_VERSION: 2
+
+  handlers:
+    - name: Restart keystone
+      systemd:
+        name: keystone
+        state: restarted
+        enabled: yes

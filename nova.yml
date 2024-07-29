@@ -1,0 +1,201 @@
+---
+- name: Install and configure OpenStack Nova on Controller
+  hosts: controller
+  become: yes
+  vars_prompt:
+    - name: "db_password"
+      prompt: "Enter the password for the Nova database user"
+      private: yes
+    - name: "rabbitmq_password"
+      prompt: "Enter the RabbitMQ password for the openstack user"
+      private: yes
+    - name: "keystone_password"
+      prompt: "Enter the password for the Nova user in Keystone"
+      private: yes
+    - name: "mysql_root_password"
+      prompt: "Enter the MySQL root password"
+      private: yes
+  vars:
+    controller_ip: "192.168.166.195"  # IP address of the controller node
+
+  tasks:
+    - name: Show set variables on Controller
+      debug:
+        msg:
+          - "db_password: {{ db_password }}"
+          - "rabbitmq_password: {{ rabbitmq_password }}"
+          - "keystone_password: {{ keystone_password }}"
+          - "mysql_root_password: {{ mysql_root_password }}"
+          - "controller_ip: {{ controller_ip }}"
+
+    - name: Set MariaDB root password before installation
+      debconf:
+        name: "mariadb-server"
+        question: "mysql-server/root_password"
+        value: "{{ mysql_root_password }}"
+        vtype: "password"
+
+    - name: Confirm MariaDB root password
+      debconf:
+        name: "mariadb-server"
+        question: "mysql-server/root_password_again"
+        value: "{{ mysql_root_password }}"
+        vtype: "password"
+
+    - name: Install MariaDB server and client
+      apt:
+        name: 
+          - mariadb-server
+        state: present
+        update_cache: yes
+
+    - name: Start and enable MariaDB service
+      systemd:
+        name: mariadb
+        state: started
+        enabled: yes
+
+    - name: Create Nova databases
+      mysql_db:
+        name: "{{ item }}"
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+      with_items:
+        - nova_api
+        - nova
+
+    - name: Grant database access to Nova user
+      mysql_user:
+        name: nova
+        password: "{{ db_password }}"
+        priv: "{{ item }}.*:ALL"
+        host: "{{ item.split('.')[1] }}"
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+      with_items:
+        - "nova_api.localhost"
+        - "nova_api.%"
+        - "nova.localhost"
+        - "nova.%"
+
+    - name: Source admin credentials
+      shell: . /root/admin-openrc.sh
+      register: admin_openrc
+      args:
+        executable: /bin/bash
+
+    # - name: Create Nova user
+    #   shell: |
+    #     . /root/admin-openrc.sh
+    #     openstack user create --domain default --password "{{ keystone_password }}" nova
+
+    - name: Add admin role to Nova user
+      shell: |
+        . /root/admin-openrc.sh
+        openstack role add --project service --user nova admin
+
+    - name: Create Nova service entity
+      shell: |
+        . /root/admin-openrc.sh
+        openstack service create --name nova --description "OpenStack Compute" compute
+
+    # - name: Create Compute service API endpoints
+    #   shell: |
+    #     . /root/admin-openrc.sh
+    #     openstack endpoint create --region RegionOne compute public http://controller:8774/v2.1/%\(tenant_id\)s
+    #     openstack endpoint create --region RegionOne compute internal http://controller:8774/v2.1/%\(tenant_id\)s
+    #     openstack endpoint create --region RegionOne compute admin http://controller:8774/v2.1/%\(tenant_id\)s
+
+    - name: Install Nova packages
+      apt:
+        name:
+          - nova-api
+          - nova-conductor
+          - nova-consoleproxy
+          - nova-scheduler
+        state: present
+
+    - name: Configure /etc/nova/nova.conf on Controller
+      template:
+        src: templates/nova.conf.j2
+        dest: /etc/nova/nova.conf
+      vars:
+        my_ip: "{{ controller_ip }}"
+
+    # - name: Populate the Compute databases
+    #   shell: |
+    #     su -s /bin/sh -c "nova-manage api_db sync" nova
+    #     su -s /bin/sh -c "nova-manage db sync" nova
+
+    - name: Restart Nova services on Controller
+      service:
+        name: "{{ item }}"
+        state: restarted
+      with_items:
+        - nova-api
+        #- nova-scheduler
+        #- nova-conductor
+        - nova-novncproxy
+
+- name: Install and configure Nova Compute on Compute nodes
+  hosts: compute
+  become: yes
+  vars_prompt:
+    - name: "rabbitmq_password"
+      prompt: "Enter the RabbitMQ password for the openstack user"
+      private: yes
+    - name: "keystone_password"
+      prompt: "Enter the password for the Nova user in Keystone"
+      private: yes
+  vars:
+    management_interface_ip: "192.168.166.235"  # IP address of the management network interface on the compute node
+    controller_ip: "192.168.166.195"  # IP address of the controller node
+    db_password: "nova"
+
+  tasks:
+    - name: Show set variables on Compute nodes
+      debug:
+        msg:
+          - "rabbitmq_password: {{ rabbitmq_password }}"
+          - "keystone_password: {{ keystone_password }}"
+          - "management_interface_ip: {{ management_interface_ip }}"
+          - "controller_ip: {{ controller_ip }}"
+
+    - name: Install Nova Compute package
+      apt:
+        name: nova-compute
+        state: present
+
+    - name: Configure /etc/nova/nova.conf on Compute nodes
+      template:
+        src: templates/nova.conf.j2
+        dest: /etc/nova/nova.conf
+      vars:
+        my_ip: "{{ management_interface_ip }}"
+
+    - name: Remove logdir option from /etc/nova/nova.conf on Compute nodes
+      lineinfile:
+        path: /etc/nova/nova.conf
+        regexp: '^logdir='
+        state: absent
+
+    - name: Check for hardware acceleration support
+      command: egrep -c '(vmx|svm)' /proc/cpuinfo
+      register: hw_accel_support
+      failed_when: false
+      changed_when: false
+     
+    - name: Configure libvirt to use QEMU if no hardware acceleration support
+      blockinfile:
+        path: /etc/nova/nova-compute.conf
+        block: |
+          [libvirt]
+          virt_type = qemu
+      when: hw_accel_support.stdout == "0"
+
+    - name: Restart Nova Compute service
+      service:
+        name: nova-compute
+        state: restarted

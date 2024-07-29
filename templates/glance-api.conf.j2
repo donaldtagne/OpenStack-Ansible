@@ -1,0 +1,25 @@
+[DEFAULT]
+bind_host = 0.0.0.0
+bind_port = 9292
+
+[database]
+connection = mysql+pymysql://glance:{{ glance_db_password }}@localhost/glance
+
+[keystone_authtoken]
+www_authenticate_uri = http://{{ controller_ip }}:5000
+auth_url = http://{{ controller_ip }}:5000
+memcached_servers = {{ controller_ip }}:11211
+auth_type = password
+project_domain_name = Default
+user_domain_name = Default
+project_name =admin
+username = glance
+password = {{ glance_user_password }}
+
+[paste_deploy]
+flavor = keystone
+
+[glance_store]
+stores = file,http
+default_store = file
+filesystem_store_datadir = /var/lib/glance/images/

@@ -1,0 +1,196 @@
+---
+- name: Install and configure Glance
+  hosts: controller
+  become: true
+
+  vars_prompt:
+    - name: "glance_db_password"
+      prompt: "Enter the Glance database password"
+      private: yes
+
+    - name: "glance_user_password"
+      prompt: "Enter the Glance user password"
+      private: yes
+
+    - name: "controller_ip"
+      prompt: "Enter the Controller IP address"
+
+    - name: "memcached_servers"
+      prompt: "Enter the Memcached servers"
+
+    - name: "mysql_root_password"
+      prompt: "Enter the MySQL root password"
+      private: yes
+
+  pre_tasks:
+    - name: show entered variables
+      debug:
+        msg: "{{ glance_db_password }}, {{ glance_user_password }}, {{ controller_ip }}, {{ memcached_servers }}, {{ mysql_root_password }}"
+        
+    - name: Set MariaDB root password before installation
+      debconf:
+        name: "mariadb-server"
+        question: "mysql-server/root_password"
+        value: "{{ mysql_root_password }}"
+        vtype: "password"
+
+    - name: Confirm MariaDB root password
+      debconf:
+        name: "mariadb-server"
+        question: "mysql-server/root_password_again"
+        value: "{{ mysql_root_password }}"
+        vtype: "password"
+
+  tasks:
+    - name: Install MariaDB server and client
+      apt:
+        name: 
+          - mariadb-server
+        state: present
+        update_cache: yes
+
+    - name: Start and enable MariaDB service
+      systemd:
+        name: mariadb
+        state: started
+        enabled: yes
+
+    - name: Create Glance database
+      mysql_db:
+        name: glance
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Grant access to Glance database
+      mysql_user:
+        name: glance
+        password: "{{ glance_db_password }}"
+        priv: "glance.*:ALL"
+        host: "localhost"
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Grant access to Glance database from any host
+      mysql_user:
+        name: glance
+        password: "{{ glance_db_password }}"
+        priv: "glance.*:ALL"
+        host: "%"
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Source admin credentials
+      shell: . /root/admin-openrc.sh
+      register: admin_openrc
+      args:
+        executable: /bin/bash
+
+    - name: Check if Glance user exists
+      shell: openstack user list --domain default -f value -c Name | grep -w glance
+      register: glance_user_check
+      ignore_errors: yes
+      environment:
+        OS_PROJECT_DOMAIN_NAME: Default
+        OS_USER_DOMAIN_NAME: Default
+        OS_PROJECT_NAME: admin
+        OS_USERNAME: admin
+        OS_PASSWORD: keystone
+        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
+        OS_IDENTITY_API_VERSION: 3
+      args:
+        executable: /bin/bash
+
+    - name: Create Glance user
+      shell: |
+        openstack user create --domain default --password {{ glance_user_password }} glance
+      when: glance_user_check.rc != 0
+      environment:
+        OS_PROJECT_DOMAIN_NAME: Default
+        OS_USER_DOMAIN_NAME: Default
+        OS_PROJECT_NAME: admin
+        OS_USERNAME: admin
+        OS_PASSWORD: keystone
+        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
+        OS_IDENTITY_API_VERSION: 3
+      register: glance_user
+
+    - name: Add admin role to Glance user
+      shell: openstack role add --project service --user glance admin
+      environment:
+        OS_PROJECT_DOMAIN_NAME: Default
+        OS_USER_DOMAIN_NAME: Default
+        OS_PROJECT_NAME: admin
+        OS_USERNAME: admin
+        OS_PASSWORD: keystone
+        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
+        OS_IDENTITY_API_VERSION: 3
+
+    - name: Create Glance service entity
+      shell: |
+        openstack service create --name glance --description "OpenStack Image" image
+      environment:
+        OS_PROJECT_DOMAIN_NAME: Default
+        OS_USER_DOMAIN_NAME: Default
+        OS_PROJECT_NAME: admin
+        OS_USERNAME: admin
+        OS_PASSWORD: keystone
+        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
+        OS_IDENTITY_API_VERSION: 3
+      register: glance_service
+
+    - name: Get Glance service ID
+      shell: openstack service list -f value -c ID -c Name | grep image | awk '{print $1}'
+      register: glance_service_id
+      environment:
+        OS_PROJECT_DOMAIN_NAME: Default
+        OS_USER_DOMAIN_NAME: Default
+        OS_PROJECT_NAME: admin
+        OS_USERNAME: admin
+        OS_PASSWORD: keystone
+        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
+
+    - name: Create Glance service API endpoints
+      shell: |
+        openstack endpoint create --region RegionOne {{ glance_service_id.stdout }} public http://{{ controller_ip }}:9292
+        openstack endpoint create --region RegionOne {{ glance_service_id.stdout }} internal http://{{ controller_ip }}:9292
+        openstack endpoint create --region RegionOne {{ glance_service_id.stdout }} admin http://{{ controller_ip }}:9292
+      environment:
+        OS_PROJECT_DOMAIN_NAME: Default
+        OS_USER_DOMAIN_NAME: Default
+        OS_PROJECT_NAME: admin
+        OS_USERNAME: admin
+        OS_PASSWORD: keystone
+        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
+        OS_IDENTITY_API_VERSION: 3
+      args:
+        executable: /bin/bash
+
+    - name: Install Glance packages
+      apt:
+        name: glance
+        state: present
+        update_cache: yes
+
+    - name: Copy glance-api.conf template
+      template:
+        src: templates/glance-api.conf.j2
+        dest: /etc/glance/glance-api.conf
+        mode: '0640'
+        owner: root
+        group: glance
+
+    - name: Populate Glance database
+      shell: su -s /bin/sh -c "glance-manage db_sync" glance
+
+    - name: Restart Glance services
+      systemd:
+        name: glance-api
+        state: restarted
+
+    - name: Ensure Glance services are enabled on boot
+      systemd:
+        name: glance-api
+        enabled: yes

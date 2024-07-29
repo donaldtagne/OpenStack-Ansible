@@ -1,0 +1,27 @@
+<VirtualHost *:80>
+    ServerName {{ controller_ip }}
+    WSGIScriptAlias / /usr/share/openstack-dashboard/wsgi.py
+    WSGIDaemonProcess horizon user=www-data group=www-data
+    WSGIProcessGroup horizon
+    WSGIApplicationGroup %{GLOBAL}
+    Alias /static /var/lib/openstack-dashboard/static
+    Alias /horizon/static /var/lib/openstack-dashboard/static
+
+    DocumentRoot /var/www
+
+    <Directory />
+        AllowOverride None
+    </Directory>
+
+    <Directory /usr/share/openstack-dashboard>
+        Require all granted
+    </Directory>
+
+    <Directory /var/lib/openstack-dashboard/static>
+        Require all granted
+    </Directory>
+
+    ErrorLog /var/log/openstack-dashboard/error.log
+    LogLevel warn
+    CustomLog /var/log/openstack-dashboard/access.log combined
+</VirtualHost>
