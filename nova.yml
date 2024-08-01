@@ -15,8 +15,9 @@
     - name: "mysql_root_password"
       prompt: "Enter the MySQL root password"
       private: yes
-  vars:
-    controller_ip: "192.168.166.195"  # IP address of the controller node
+    - name: "controller_ip"
+      prompt: "Enter the controller_ip"
+      private: no
 
   tasks:
     - name: Show set variables on Controller
@@ -55,30 +56,56 @@
         state: started
         enabled: yes
 
-    - name: Create Nova databases
-      mysql_db:
-        name: "{{ item }}"
-        state: present
-        login_user: root
-        login_password: "{{ mysql_root_password }}"
-      with_items:
-        - nova_api
-        - nova
+    # - name: Create Nova databases
+    #   mysql_db:
+    #     name: "{{ item }}"
+    #     state: present
+    #     login_user: root
+    #     login_password: "{{ mysql_root_password }}"
+    #   with_items:
+    #     - nova_api
+    #     - nova
 
-    - name: Grant database access to Nova user
-      mysql_user:
-        name: nova
-        password: "{{ db_password }}"
-        priv: "{{ item }}.*:ALL"
-        host: "{{ item.split('.')[1] }}"
-        state: present
-        login_user: root
-        login_password: "{{ mysql_root_password }}"
-      with_items:
-        - "nova_api.localhost"
-        - "nova_api.%"
-        - "nova.localhost"
-        - "nova.%"
+    # - name: Grant database access to Nova user for localhost
+    #   mysql_user:
+    #     name: nova
+    #     password: "{{ db_password }}"
+    #     priv: "nova_api.*:ALL"
+    #     host: "localhost"
+    #     state: present
+    #     login_user: root
+    #     login_password: "{{ mysql_root_password }}"
+
+    # - name: Grant database access to Nova user for any host
+    #   mysql_user:
+    #     name: nova
+    #     password: "{{ db_password }}"
+    #     priv: "nova_api.*:ALL"
+    #     host: "%"
+    #     state: present
+    #     login_user: root
+    #     login_password: "{{ mysql_root_password }}"
+
+    # - name: Grant database access to Nova user for nova database on localhost
+    #   mysql_user:
+    #     name: nova
+    #     password: "{{ db_password }}"
+    #     priv: "nova.*:ALL"
+    #     host: "localhost"
+    #     state: present
+    #     login_user: root
+    #     login_password: "{{ mysql_root_password }}"
+
+    # - name: Grant database access to Nova user for nova database on any host
+    #   mysql_user:
+    #     name: nova
+    #     password: "{{ db_password }}"
+    #     priv: "nova.*:ALL"
+    #     host: "%"
+    #     state: present
+    #     login_user: root
+    #     login_password: "{{ mysql_root_password }}"
+
 
     - name: Source admin credentials
       shell: . /root/admin-openrc.sh
@@ -86,10 +113,10 @@
       args:
         executable: /bin/bash
 
-    # - name: Create Nova user
-    #   shell: |
-    #     . /root/admin-openrc.sh
-    #     openstack user create --domain default --password "{{ keystone_password }}" nova
+    - name: Create Nova user
+      shell: |
+        . /root/admin-openrc.sh
+        openstack user create --domain default --password "{{ keystone_password }}" nova
 
     - name: Add admin role to Nova user
       shell: |
@@ -101,12 +128,22 @@
         . /root/admin-openrc.sh
         openstack service create --name nova --description "OpenStack Compute" compute
 
-    # - name: Create Compute service API endpoints
-    #   shell: |
-    #     . /root/admin-openrc.sh
-    #     openstack endpoint create --region RegionOne compute public http://controller:8774/v2.1/%\(tenant_id\)s
-    #     openstack endpoint create --region RegionOne compute internal http://controller:8774/v2.1/%\(tenant_id\)s
-    #     openstack endpoint create --region RegionOne compute admin http://controller:8774/v2.1/%\(tenant_id\)s
+    - name: Create Compute service API endpoints
+      shell: openstack endpoint create --region RegionOne compute {{ item.interface }} http://controller:8774/v2.1/%\(tenant_id\)s
+      environment:
+        OS_PROJECT_DOMAIN_NAME: Default
+        OS_USER_DOMAIN_NAME: Default
+        OS_PROJECT_NAME: admin
+        OS_USERNAME: admin
+        OS_PASSWORD: root
+        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
+        OS_IDENTITY_API_VERSION: 3
+      with_items:
+        - interface: "public"
+        - interface: "internal"
+        - interface: "admin"
+      args:
+        executable: /bin/bash
 
     - name: Install Nova packages
       apt:
@@ -124,10 +161,10 @@
       vars:
         my_ip: "{{ controller_ip }}"
 
-    # - name: Populate the Compute databases
-    #   shell: |
-    #     su -s /bin/sh -c "nova-manage api_db sync" nova
-    #     su -s /bin/sh -c "nova-manage db sync" nova
+    - name: Populate the Compute databases
+      shell: |
+        su -s /bin/sh -c "nova-manage api_db sync" nova
+        su -s /bin/sh -c "nova-manage db sync" nova
 
     - name: Restart Nova services on Controller
       service:
@@ -135,8 +172,8 @@
         state: restarted
       with_items:
         - nova-api
-        #- nova-scheduler
-        #- nova-conductor
+        - nova-scheduler
+        - nova-conductor
         - nova-novncproxy
 
 - name: Install and configure Nova Compute on Compute nodes
@@ -150,8 +187,8 @@
       prompt: "Enter the password for the Nova user in Keystone"
       private: yes
   vars:
-    management_interface_ip: "192.168.166.235"  # IP address of the management network interface on the compute node
-    controller_ip: "192.168.166.195"  # IP address of the controller node
+    management_interface_ip: "192.168.166.234"  
+    controller_ip: "192.168.166.181"  
     db_password: "nova"
 
   tasks:
@@ -186,7 +223,7 @@
       register: hw_accel_support
       failed_when: false
       changed_when: false
-     
+
     - name: Configure libvirt to use QEMU if no hardware acceleration support
       blockinfile:
         path: /etc/nova/nova-compute.conf

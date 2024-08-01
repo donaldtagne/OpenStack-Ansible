@@ -14,6 +14,7 @@ PLAYBOOKS=(
   #"glance.yml"
   #"horizon.yml"
   nova.yml
+  #placement.yml
 )
 
 # Fehlerzähler

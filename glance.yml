@@ -14,19 +14,21 @@
 
     - name: "controller_ip"
       prompt: "Enter the Controller IP address"
+      private: no
 
     - name: "memcached_servers"
       prompt: "Enter the Memcached servers"
+      private: no
 
     - name: "mysql_root_password"
       prompt: "Enter the MySQL root password"
       private: yes
 
   pre_tasks:
-    - name: show entered variables
+    - name: Show entered variables
       debug:
         msg: "{{ glance_db_password }}, {{ glance_user_password }}, {{ controller_ip }}, {{ memcached_servers }}, {{ mysql_root_password }}"
-        
+
     - name: Set MariaDB root password before installation
       debconf:
         name: "mariadb-server"
@@ -88,34 +90,16 @@
       args:
         executable: /bin/bash
 
-    - name: Check if Glance user exists
-      shell: openstack user list --domain default -f value -c Name | grep -w glance
-      register: glance_user_check
-      ignore_errors: yes
-      environment:
-        OS_PROJECT_DOMAIN_NAME: Default
-        OS_USER_DOMAIN_NAME: Default
-        OS_PROJECT_NAME: admin
-        OS_USERNAME: admin
-        OS_PASSWORD: keystone
-        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
-        OS_IDENTITY_API_VERSION: 3
-      args:
-        executable: /bin/bash
-
     - name: Create Glance user
-      shell: |
-        openstack user create --domain default --password {{ glance_user_password }} glance
-      when: glance_user_check.rc != 0
+      shell: openstack user create --domain default --password {{ glance_user_password }} glance
       environment:
         OS_PROJECT_DOMAIN_NAME: Default
         OS_USER_DOMAIN_NAME: Default
         OS_PROJECT_NAME: admin
         OS_USERNAME: admin
-        OS_PASSWORD: keystone
+        OS_PASSWORD: root
         OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
         OS_IDENTITY_API_VERSION: 3
-      register: glance_user
 
     - name: Add admin role to Glance user
       shell: openstack role add --project service --user glance admin
@@ -124,47 +108,35 @@
         OS_USER_DOMAIN_NAME: Default
         OS_PROJECT_NAME: admin
         OS_USERNAME: admin
-        OS_PASSWORD: keystone
+        OS_PASSWORD: root
         OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
         OS_IDENTITY_API_VERSION: 3
 
     - name: Create Glance service entity
-      shell: |
-        openstack service create --name glance --description "OpenStack Image" image
+      shell: openstack service create --name glance --description "OpenStack Image" image
       environment:
         OS_PROJECT_DOMAIN_NAME: Default
         OS_USER_DOMAIN_NAME: Default
         OS_PROJECT_NAME: admin
         OS_USERNAME: admin
-        OS_PASSWORD: keystone
+        OS_PASSWORD: root
         OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
         OS_IDENTITY_API_VERSION: 3
-      register: glance_service
-
-    - name: Get Glance service ID
-      shell: openstack service list -f value -c ID -c Name | grep image | awk '{print $1}'
-      register: glance_service_id
-      environment:
-        OS_PROJECT_DOMAIN_NAME: Default
-        OS_USER_DOMAIN_NAME: Default
-        OS_PROJECT_NAME: admin
-        OS_USERNAME: admin
-        OS_PASSWORD: keystone
-        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
 
     - name: Create Glance service API endpoints
-      shell: |
-        openstack endpoint create --region RegionOne {{ glance_service_id.stdout }} public http://{{ controller_ip }}:9292
-        openstack endpoint create --region RegionOne {{ glance_service_id.stdout }} internal http://{{ controller_ip }}:9292
-        openstack endpoint create --region RegionOne {{ glance_service_id.stdout }} admin http://{{ controller_ip }}:9292
+      shell: openstack endpoint create --region RegionOne image {{ item.interface }} http://{{ controller_ip }}:9292
       environment:
         OS_PROJECT_DOMAIN_NAME: Default
         OS_USER_DOMAIN_NAME: Default
         OS_PROJECT_NAME: admin
         OS_USERNAME: admin
-        OS_PASSWORD: keystone
+        OS_PASSWORD: root
         OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
         OS_IDENTITY_API_VERSION: 3
+      with_items:
+        - interface: "public"
+        - interface: "internal"
+        - interface: "admin"
       args:
         executable: /bin/bash
 
@@ -194,3 +166,44 @@
       systemd:
         name: glance-api
         enabled: yes
+
+    - name: Download Debian 12 Cloud Image
+      get_url:
+        url: "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
+        dest: "/tmp/debian-12-genericcloud-amd64.qcow2"
+        mode: '0644'
+
+    - name: Upload image to Glance
+      command: >
+        openstack image create "Debian 12"
+        --file /tmp/debian-12-genericcloud-amd64.qcow2
+        --disk-format qcow2
+        --container-format bare
+        --public
+      environment:
+        OS_PROJECT_DOMAIN_NAME: Default
+        OS_USER_DOMAIN_NAME: Default
+        OS_PROJECT_NAME: admin
+        OS_USERNAME: admin
+        OS_PASSWORD: root
+        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
+        OS_IDENTITY_API_VERSION: 3
+      args:
+        executable: /bin/bash
+
+    - name: Verify image upload
+      command: openstack image list
+      register: image_list
+      environment:
+        OS_PROJECT_DOMAIN_NAME: Default
+        OS_USER_DOMAIN_NAME: Default
+        OS_PROJECT_NAME: admin
+        OS_USERNAME: admin
+        OS_PASSWORD: root
+        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
+        OS_IDENTITY_API_VERSION: 3
+      args:
+        executable: /bin/bash
+
+    - debug:
+        var: image_list.stdout

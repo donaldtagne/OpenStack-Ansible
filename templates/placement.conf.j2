@@ -1,0 +1,18 @@
+[placement_database]
+connection = mysql+pymysql://placement:{{ placement_db_password }}@localhost/placement
+
+[api]
+auth_strategy = keystone
+
+[keystone_authtoken]
+auth_url = http://{{ controller_ip }}:5000/v3
+memcached_servers = {{ controller_ip }}:11211
+auth_type = password
+project_domain_name = Default
+user_domain_name = Default
+project_name = service
+username = placement
+password = {{ placement_password }}
+
+[oslo_concurrency]
+lock_path = /var/lib/placement/tmp

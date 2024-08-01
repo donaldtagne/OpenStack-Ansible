@@ -1,0 +1,215 @@
+---
+- name: Setup OpenStack Placement
+  hosts: controller
+  become: true
+  vars_prompt:
+    - name: mariadb_root_password
+      prompt: "Enter the MariaDB root password"
+      private: yes
+    - name: placement_db_password
+      prompt: "Enter the password for the Placement database user"
+      private: yes
+    - name: placement_password
+      prompt: "Enter the password for the Placement service user"
+      private: yes
+    - name: controller_ip
+      prompt: "Enter the controller IP address"
+      private: no
+
+  tasks:
+    - name: Install necessary packages
+      apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+      loop:
+        - mariadb-server
+        - placement-api
+        - python3-pip
+        - python3-osc-placement
+
+    - name: Start and enable MariaDB service
+      systemd:
+        name: mariadb
+        state: started
+        enabled: yes
+
+    - name: Create Placement database
+      mysql_db:
+        login_user: root
+        login_password: "{{ mariadb_root_password }}"
+        name: placement
+        state: present
+
+    - name: Grant privileges to the Placement database
+      mysql_user:
+        login_user: root
+        login_password: "{{ mariadb_root_password }}"
+        name: placement
+        password: "{{ placement_db_password }}"
+        priv: "placement.*:ALL"
+        host: "{{ item }}"
+        state: present
+      loop:
+        - "localhost"
+        - "%"
+
+    - name: Source admin credentials
+      shell: . /root/admin-openrc.sh
+      args:
+        executable: /bin/bash
+
+    - name: Create Placement user
+      shell: openstack user create --domain default --password {{ placement_password }} placement
+      environment:
+        OS_PROJECT_DOMAIN_NAME: Default
+        OS_USER_DOMAIN_NAME: Default
+        OS_PROJECT_NAME: admin
+        OS_USERNAME: admin
+        OS_PASSWORD: root
+        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
+        OS_IDENTITY_API_VERSION: 3
+      args:
+        executable: /bin/bash
+
+    - name: Add Placement user to the service project with admin role
+      shell: openstack role add --project service --user placement admin
+      environment:
+        OS_PROJECT_DOMAIN_NAME: Default
+        OS_USER_DOMAIN_NAME: Default
+        OS_PROJECT_NAME: admin
+        OS_USERNAME: admin
+        OS_PASSWORD: root
+        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
+        OS_IDENTITY_API_VERSION: 3
+      args:
+        executable: /bin/bash
+
+    - name: Create Placement service
+      shell: openstack service create --name placement --description "Placement API" placement
+      environment:
+        OS_PROJECT_DOMAIN_NAME: Default
+        OS_USER_DOMAIN_NAME: Default
+        OS_PROJECT_NAME: admin
+        OS_USERNAME: admin
+        OS_PASSWORD: root
+        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
+        OS_IDENTITY_API_VERSION: 3
+      args:
+        executable: /bin/bash
+
+    - name: Create Placement service endpoints
+      shell: >
+        openstack endpoint create --region RegionOne
+        placement {{ item.interface }} http://{{ controller_ip }}:8778
+      environment:
+        OS_PROJECT_DOMAIN_NAME: Default
+        OS_USER_DOMAIN_NAME: Default
+        OS_PROJECT_NAME: admin
+        OS_USERNAME: admin
+        OS_PASSWORD: root
+        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
+        OS_IDENTITY_API_VERSION: 3
+      with_items:
+        - interface: "public"
+        - interface: "internal"
+        - interface: "admin"
+      args:
+        executable: /bin/bash
+
+    - name: Create placement.conf from template
+      template:
+        src: templates/placement.conf.j2
+        dest: /etc/placement/placement.conf
+        owner: placement
+        group: placement
+        mode: '0644'
+
+    - name: Create WSGI directory
+      file:
+        path: /var/www/cgi-bin
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Create WSGI file for placement
+      copy:
+        content: |
+          import sys
+          sys.path.insert(0, '/usr/lib/python3/dist-packages')
+
+          from placement import deploy
+          application = deploy.loadapp('config:/etc/placement/placement.conf')
+        dest: /var/www/cgi-bin/placement
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Create Apache configuration for placement
+      copy:
+        content: |
+          <VirtualHost *:8778>
+              WSGIDaemonProcess placement-api processes=2 threads=10 user=placement group=placement
+              WSGIScriptAlias / /var/www/cgi-bin/placement
+
+              <Directory /var/www/cgi-bin>
+                  Require all granted
+              </Directory>
+
+              ErrorLog /var/log/apache2/placement_error.log
+              CustomLog /var/log/apache2/placement_access.log combined
+          </VirtualHost>
+        dest: /etc/apache2/sites-available/placement-api.conf
+
+    - name: Enable Placement site
+      command: a2ensite placement-api
+
+    - name: Populate the Placement database
+      command: >
+        su -s /bin/sh -c "placement-manage db sync" placement
+
+    - name: Restart Apache to apply changes
+      service:
+        name: apache2
+        state: restarted
+
+    - name: Check Placement status
+      shell: placement-status upgrade check
+      register: placement_status
+      args:
+        executable: /bin/bash
+
+    - name: Restart placement-api to apply changes
+      service:
+        name: placement-api
+        state: restarted
+
+    - name: List available resource classes
+      shell: openstack --os-placement-api-version 1.2 resource class list --sort-column name
+      register: resource_class_list
+      environment:
+        OS_PROJECT_DOMAIN_NAME: Default
+        OS_USER_DOMAIN_NAME: Default
+        OS_PROJECT_NAME: admin
+        OS_USERNAME: admin
+        OS_PASSWORD: root
+        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
+        OS_IDENTITY_API_VERSION: 3
+      args:
+        executable: /bin/bash
+
+    - name: List available traits
+      shell: openstack --os-placement-api-version 1.6 trait list --sort-column name
+      register: trait_list
+      environment:
+        OS_PROJECT_DOMAIN_NAME: Default
+        OS_USER_DOMAIN_NAME: Default
+        OS_PROJECT_NAME: admin
+        OS_USERNAME: admin
+        OS_PASSWORD: root
+        OS_AUTH_URL: http://{{ controller_ip }}:5000/v3
+        OS_IDENTITY_API_VERSION: 3
+      args:
+        executable: /bin/bash
+
