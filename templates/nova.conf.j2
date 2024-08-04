@@ -3,6 +3,7 @@ my_ip = {{ my_ip }}
 use_neutron = True
 firewall_driver = nova.virt.firewall.NoopFirewallDriver
 enabled_apis = osapi_compute,metadata
+transport_url = rabbit://openstack:{{rabbitmq_password}}@controller
 
 [api]
 auth_strategy = keystone
@@ -37,6 +38,9 @@ novncproxy_base_url = http://{{ controller_ip }}:6080/vnc_auto.html
 [glance]
 api_servers = http://{{ controller_ip }}:9292
 
+[cinder]
+os_region_name = RegionOne
+
 [oslo_concurrency]
 lock_path = /var/lib/nova/tmp
 
@@ -52,3 +56,14 @@ password = root
 
 [scheduler]
 discover_hosts_in_cells_interval = 300
+
+[service_user]
+send_service_user_token = true
+auth_url = https://controller/identity
+auth_strategy = keystone
+auth_type = password
+project_domain_name = Default
+project_name = service
+user_domain_name = Default
+username = nova
+password = {{ keystone_password }}

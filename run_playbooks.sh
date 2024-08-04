@@ -11,10 +11,11 @@ fi
 # Playbooksliste
 PLAYBOOKS=(
   #"keystone.yml" 
-  #"glance.yml"
+  #glance.yml"
   #"horizon.yml"
-  nova.yml
+  #nova.yml
   #placement.yml
+  cinder.yml
 )
 
 # Fehlerzähler

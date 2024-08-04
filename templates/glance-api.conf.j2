@@ -1,6 +1,7 @@
 [DEFAULT]
 bind_host = 0.0.0.0
 bind_port = 9292
+transport_url = rabbit://openstack:{{ glance_db_password }}@{{ controller_ip }}
 
 [database]
 connection = mysql+pymysql://glance:{{ glance_db_password }}@localhost/glance

@@ -1,0 +1,206 @@
+---
+- name: Install and configure Cinder on Controller
+  hosts: controller
+  become: yes
+  vars_prompt:
+    - name: "db_password"
+      prompt: "Enter the password for the Cinder database user"
+      private: yes
+    - name: "rabbitmq_password"
+      prompt: "Enter the RabbitMQ password for the openstack user"
+      private: yes
+    - name: "keystone_password"
+      prompt: "Enter the password for the Cinder user in Keystone"
+      private: yes
+    - name: "mysql_root_password"
+      prompt: "Enter the MySQL root password"
+      private: yes
+    - name: "controller_ip"
+      prompt: "Enter the controller_ip"
+      private: no
+    - name: "management_interface_ip"
+      prompt: "Enter the management_interface_ip"
+      private: no
+    - name: "cinder_pass"
+      prompt: "enter the cinder Password"
+      private: no
+
+  tasks:
+    - name: Create Cinder database
+      mysql_db:
+        name: cinder
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: Grant database access to Cinder user
+      shell: |
+        mysql -u root -p"{{ mysql_root_password }}" <<EOF
+        GRANT ALL PRIVILEGES ON cinder.* TO 'cinder'@'localhost' IDENTIFIED BY '{{ cinder_pass }}';
+        GRANT ALL PRIVILEGES ON cinder.* TO 'cinder'@'%' IDENTIFIED BY '{{ cinder_pass }}';
+        FLUSH PRIVILEGES;
+        EOF
+
+    - name: Source admin credentials
+      shell: . /root/admin-openrc.sh
+      register: admin_openrc
+      args:
+        executable: /bin/bash
+
+    - name: Create Cinder user
+      shell: |
+        . /root/admin-openrc.sh
+        openstack user create --domain default --password "{{ keystone_password }}" cinder
+
+    - name: Add admin role to Cinder user
+      shell: |
+        . /root/admin-openrc.sh
+        openstack role add --project service --user cinder admin
+
+    - name: Create Cinder v3 service entity
+      shell: |
+        . /root/admin-openrc.sh
+        openstack service create --name cinderv3 --description "OpenStack Block Storage" volumev3
+
+    - name: Create Block Storage service API endpoints
+      shell: |
+        . /root/admin-openrc.sh
+        openstack endpoint create --region RegionOne volumev3 public http://controller:8776/v3/%\(project_id\)s
+        openstack endpoint create --region RegionOne volumev3 internal http://controller:8776/v3/%\(project_id\)s
+        openstack endpoint create --region RegionOne volumev3 admin http://controller:8776/v3/%\(project_id\)s
+
+    - name: Install Cinder packages
+      apt:
+        name:
+          - cinder-api
+          - cinder-scheduler
+        state: present
+        update_cache: yes
+
+    - name: Configure /etc/cinder/cinder.conf on Controller
+      template:
+        src: templates/cinder.conf.j2
+        dest: /etc/cinder/cinder.conf
+
+    - name: Populate the Block Storage database
+      shell: |
+        su -s /bin/sh -c "cinder-manage db sync" cinder
+
+    - name: Ensure [mysqld] section exists in my.cnf
+      blockinfile:
+        path: /etc/mysql/my.cnf
+        block: |
+          [mysqld]
+
+    - name: Ensure bind-address is set to 0.0.0.0 in my.cnf
+      lineinfile:
+        path: /etc/mysql/my.cnf
+        insertafter: '^\[mysqld\]'
+        line: 'bind-address = 0.0.0.0'
+
+    - name: Restart services
+      service:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - nova-api
+        - cinder-scheduler
+        - apache2
+        - cinder-api
+        - mysql
+
+- name: Install and configure Cinder on Storage
+  hosts: storage
+  become: yes
+  vars_prompt:
+    - name: "db_password"
+      prompt: "Enter the password for the Cinder database user"
+      private: yes
+    - name: "rabbitmq_password"
+      prompt: "Enter the RabbitMQ password for the openstack user"
+      private: yes
+    - name: "keystone_password"
+      prompt: "Enter the password for the Cinder user in Keystone"
+      private: yes
+    - name: "management_interface_ip"
+      prompt: "Enter the management_interface_ip"
+      private: no
+    - name: "cinder_pass"
+      prompt: "enter the cinder Password"
+      private: no
+
+  tasks:
+    - name: Install supporting utility packages
+      apt:
+        name:
+          - lvm2
+          - thin-provisioning-tools
+        state: present
+        update_cache: yes
+
+    - name: Check if /dev/sdb exists
+      stat:
+        path: /dev/sdb
+      register: sdb_device
+
+    - name: Create a file to use as a block device if /dev/sdb does not exist
+      command: dd if=/dev/zero of=/mnt/cinder-volumes.img bs=1M count=10240
+      when: not sdb_device.stat.exists
+
+    - name: Set up loop device if /dev/sdb does not exist
+      command: losetup /dev/loop0 /mnt/cinder-volumes.img
+      when: not sdb_device.stat.exists
+
+    - name: Use /dev/sdb or /dev/loop0 as the block device
+      set_fact:
+        cinder_block_device: "{{ '/dev/sdb' if sdb_device.stat.exists else '/dev/loop0' }}"
+
+    - name: Create LVM physical volume
+      command: pvcreate {{ cinder_block_device }}
+      when: cinder_block_device is defined
+
+    - name: Create LVM volume group
+      command: vgcreate cinder-volumes {{ cinder_block_device }}
+      when: cinder_block_device is defined
+
+    - name: Configure LVM filter
+      lineinfile:
+        path: /etc/lvm/lvm.conf
+        regexp: 'filter = '
+        line: "filter = [ 'a/{{ cinder_block_device.split('/')[-1] }}/', 'r/.*/']"
+        insertafter: 'devices {'
+
+    - name: Install Cinder packages
+      apt:
+        name:
+          - cinder-volume
+          - tgt
+        state: present
+        update_cache: yes
+
+    - name: Configure /etc/cinder/cinder.conf on Storage
+      template:
+        src: templates/cinder.conf.j2
+        dest: /etc/cinder/cinder.conf
+
+    - name: Configure tgt
+      copy:
+        content: 'include /var/lib/cinder/volumes/*'
+        dest: /etc/tgt/conf.d/cinder.conf
+
+    - name: Enable and start services
+      systemd:
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+      loop:
+        - tgt
+        - cinder-volume
+
+    - name: Restart services
+      service:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - tgt
+        - cinder-volume

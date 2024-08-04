@@ -18,6 +18,9 @@
     - name: "controller_ip"
       prompt: "Enter the controller_ip"
       private: no
+    - name: "management_interface_ip"
+      prompt: "Enter the management_interface_ip"
+      private: no
 
   tasks:
     - name: Show set variables on Controller
@@ -28,6 +31,7 @@
           - "keystone_password: {{ keystone_password }}"
           - "mysql_root_password: {{ mysql_root_password }}"
           - "controller_ip: {{ controller_ip }}"
+          - "management_interface_ip: {{ management_interface_ip }}"
 
     - name: Set MariaDB root password before installation
       debconf:
@@ -56,56 +60,28 @@
         state: started
         enabled: yes
 
-    # - name: Create Nova databases
-    #   mysql_db:
-    #     name: "{{ item }}"
-    #     state: present
-    #     login_user: root
-    #     login_password: "{{ mysql_root_password }}"
-    #   with_items:
-    #     - nova_api
-    #     - nova
+    - name: Create Nova databases
+      mysql_db:
+        name: "{{ item }}"
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+      with_items:
+        - nova_api
+        - nova
+        - nova_cell0
 
-    # - name: Grant database access to Nova user for localhost
-    #   mysql_user:
-    #     name: nova
-    #     password: "{{ db_password }}"
-    #     priv: "nova_api.*:ALL"
-    #     host: "localhost"
-    #     state: present
-    #     login_user: root
-    #     login_password: "{{ mysql_root_password }}"
-
-    # - name: Grant database access to Nova user for any host
-    #   mysql_user:
-    #     name: nova
-    #     password: "{{ db_password }}"
-    #     priv: "nova_api.*:ALL"
-    #     host: "%"
-    #     state: present
-    #     login_user: root
-    #     login_password: "{{ mysql_root_password }}"
-
-    # - name: Grant database access to Nova user for nova database on localhost
-    #   mysql_user:
-    #     name: nova
-    #     password: "{{ db_password }}"
-    #     priv: "nova.*:ALL"
-    #     host: "localhost"
-    #     state: present
-    #     login_user: root
-    #     login_password: "{{ mysql_root_password }}"
-
-    # - name: Grant database access to Nova user for nova database on any host
-    #   mysql_user:
-    #     name: nova
-    #     password: "{{ db_password }}"
-    #     priv: "nova.*:ALL"
-    #     host: "%"
-    #     state: present
-    #     login_user: root
-    #     login_password: "{{ mysql_root_password }}"
-
+    - name: Grant database access to Nova user for localhost and any host
+      shell: |
+        mysql -u root -p"{{ mysql_root_password }}" <<EOF
+        GRANT ALL PRIVILEGES ON nova_api.* TO 'nova'@'localhost' IDENTIFIED BY '{{ db_password }}';
+        GRANT ALL PRIVILEGES ON nova_api.* TO 'nova'@'%' IDENTIFIED BY '{{ db_password }}';
+        GRANT ALL PRIVILEGES ON nova.* TO 'nova'@'localhost' IDENTIFIED BY '{{ db_password }}';
+        GRANT ALL PRIVILEGES ON nova.* TO 'nova'@'%' IDENTIFIED BY '{{ db_password }}';
+        GRANT ALL PRIVILEGES ON nova_cell0.* TO 'nova'@'localhost' IDENTIFIED BY '{{ db_password }}';
+        GRANT ALL PRIVILEGES ON nova_cell0.* TO 'nova'@'%' IDENTIFIED BY '{{ db_password }}';
+        FLUSH PRIVILEGES;
+        EOF
 
     - name: Source admin credentials
       shell: . /root/admin-openrc.sh
@@ -129,7 +105,7 @@
         openstack service create --name nova --description "OpenStack Compute" compute
 
     - name: Create Compute service API endpoints
-      shell: openstack endpoint create --region RegionOne compute {{ item.interface }} http://controller:8774/v2.1/%\(tenant_id\)s
+      shell: openstack endpoint create --region RegionOne compute {{ item.interface }} http://controller:8774/v2.1 
       environment:
         OS_PROJECT_DOMAIN_NAME: Default
         OS_USER_DOMAIN_NAME: Default
@@ -153,18 +129,45 @@
           - nova-consoleproxy
           - nova-scheduler
         state: present
+        
+    - name: Configure RabbitMQ and Firewall
+      apt:
+        name: rabbitmq-server
+        state: present
+        update_cache: yes
+
+    - name: Add RabbitMQ user for OpenStack
+      shell: |
+        sudo rabbitmqctl add_user openstack {{ rabbitmq_password }}
+      become: true
+      ignore_errors: true
+
+    - name: Set RabbitMQ permissions for OpenStack user
+      shell: |
+        sudo rabbitmqctl set_permissions -p / openstack ".*" ".*" ".*"
+      become: true
 
     - name: Configure /etc/nova/nova.conf on Controller
       template:
         src: templates/nova.conf.j2
         dest: /etc/nova/nova.conf
       vars:
-        my_ip: "{{ controller_ip }}"
+        my_ip: "{{ management_interface_ip }}"
 
     - name: Populate the Compute databases
       shell: |
         su -s /bin/sh -c "nova-manage api_db sync" nova
+        su -s /bin/sh -c "nova-manage cell_v2 map_cell0" nova
+        su -s /bin/sh -c "nova-manage cell_v2 create_cell --name=cell1 --verbose" nova
         su -s /bin/sh -c "nova-manage db sync" nova
+    
+    - name: Restart Apache2 and Placement-api
+      service:
+        name: "{{ item }}"
+        state: restarted
+      with_items:
+       - apache2
+       - placement-api
 
     - name: Restart Nova services on Controller
       service:
@@ -175,6 +178,7 @@
         - nova-scheduler
         - nova-conductor
         - nova-novncproxy
+        - rabbitmq-server
 
 - name: Install and configure Nova Compute on Compute nodes
   hosts: compute
@@ -186,11 +190,15 @@
     - name: "keystone_password"
       prompt: "Enter the password for the Nova user in Keystone"
       private: yes
-  vars:
-    management_interface_ip: "192.168.166.234"  
-    controller_ip: "192.168.166.181"  
-    db_password: "nova"
-
+    - name: "management_interface_ip"
+      prompt: "Enter the management_interface_ip"
+      private: no
+    - name: "controller_ip"
+      prompt: "Enter the controller_ip"
+      private: no
+    - name: "db_password"
+      prompt: "Enter thedb_password"
+      private: no
   tasks:
     - name: Show set variables on Compute nodes
       debug:
@@ -199,6 +207,7 @@
           - "keystone_password: {{ keystone_password }}"
           - "management_interface_ip: {{ management_interface_ip }}"
           - "controller_ip: {{ controller_ip }}"
+          - "db_password:{{ db_password }}"
 
     - name: Install Nova Compute package
       apt:
@@ -232,6 +241,14 @@
           virt_type = qemu
       when: hw_accel_support.stdout == "0"
 
+    - name: Ensure firewall allows RabbitMQ traffic
+      iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 5672
+        jump: ACCEPT
+      become: true
+      
     - name: Restart Nova Compute service
       service:
         name: nova-compute
