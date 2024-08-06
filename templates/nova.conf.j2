@@ -25,7 +25,7 @@ memcached_servers = {{ controller_ip }}:11211
 auth_type = password
 project_domain_name = Default
 user_domain_name = Default
-project_name = service
+project_name = admin
 username = nova
 password = {{ keystone_password }}
 
@@ -47,7 +47,7 @@ lock_path = /var/lib/nova/tmp
 [placement]
 region_name = RegionOne
 project_domain_name = Default
-project_name = service
+project_name = admin
 auth_type = password
 user_domain_name = Default
 auth_url = http://{{ controller_ip }}:5000/v3
@@ -63,7 +63,7 @@ auth_url = https://controller/identity
 auth_strategy = keystone
 auth_type = password
 project_domain_name = Default
-project_name = service
+project_name = admin
 user_domain_name = Default
 username = nova
 password = {{ keystone_password }}

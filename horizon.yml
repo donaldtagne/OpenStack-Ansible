@@ -6,8 +6,10 @@
   vars_prompt:
     - name: "controller_ip"
       prompt: "Enter the Controller IP address"
+      private: no
     - name: "timezone"
       prompt: "Enter the timezone"
+      private: no
 
   pre_tasks:
     - name: show entered variables

@@ -97,7 +97,7 @@
     - name: Add admin role to Nova user
       shell: |
         . /root/admin-openrc.sh
-        openstack role add --project service --user nova admin
+        openstack role add --project admin --user nova admin
 
     - name: Create Nova service entity
       shell: |

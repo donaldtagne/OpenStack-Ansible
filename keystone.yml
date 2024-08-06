@@ -5,16 +5,16 @@
   vars_prompt:
     - name: "mysql_root_password"
       prompt: "Enter the MySQL root password"
-      private: yes
+      private: no
     - name: "keystone_db_password"
       prompt: "Enter the Keystone database password"
-      private: yes
+      private: no
     - name: "admin_password"
       prompt: "Enter the Keystone admin password"
-      private: yes
+      private: no
     - name: "controller_ip"
       prompt: "Enter the Controller IP address"
-
+      private: no
   pre_tasks:
     - name: show entered variables
       debug:

@@ -73,7 +73,7 @@
         executable: /bin/bash
 
     - name: Add Placement user to the service project with admin role
-      shell: openstack role add --project service --user placement admin
+      shell: openstack role add --project admin --user placement admin
       environment:
         OS_PROJECT_DOMAIN_NAME: Default
         OS_USER_DOMAIN_NAME: Default

@@ -55,7 +55,7 @@
     - name: Add admin role to Cinder user
       shell: |
         . /root/admin-openrc.sh
-        openstack role add --project service --user cinder admin
+        openstack role add --project admin --user cinder admin
 
     - name: Create Cinder v3 service entity
       shell: |

@@ -102,7 +102,7 @@
         OS_IDENTITY_API_VERSION: 3
 
     - name: Add admin role to Glance user
-      shell: openstack role add --project service --user glance admin
+      shell: openstack role add --project admin --user glance admin
       environment:
         OS_PROJECT_DOMAIN_NAME: Default
         OS_USER_DOMAIN_NAME: Default
